@@ -1,95 +1,146 @@
-﻿import { createClient } from '@/lib/supabase/server';
+import Link from 'next/link';
+import { LogOut } from 'lucide-react';
+import { createClient } from '@/lib/supabase/server';
+import { dayRange, todayInCasablanca } from '@/lib/dates';
+import { ordersHref } from '@/lib/orders-url';
+import { signOut } from '../actions';
+import OrderCard from '@/components/admin/OrderCard';
+import DayPicker from '@/components/admin/DayPicker';
+import RealtimeOrders from '@/components/admin/RealtimeOrders';
+import { CITIES, ORDER_STATUSES, STATUS_LABELS, type Order } from '@/types';
 
-export default async function OrdersPage({ searchParams }: { searchParams: { city?: string; status?: string } }) {
+type SearchParams = Promise<{ day?: string; city?: string; status?: string }>;
+
+const fmt = (n: number) => n.toLocaleString('fr-FR');
+
+export default async function OrdersPage({ searchParams }: { searchParams: SearchParams }) {
+  const sp = await searchParams;
+
+  const day = sp.day && /^\d{4}-\d{2}-\d{2}$/.test(sp.day) ? sp.day : todayInCasablanca();
+  const city = sp.city && (CITIES as readonly string[]).includes(sp.city) ? sp.city : 'all';
+  const status =
+    sp.status && (ORDER_STATUSES as readonly string[]).includes(sp.status) ? sp.status : 'all';
+
+  const { start, end } = dayRange(day);
   const supabase = await createClient();
-  const city = searchParams.city || 'all';
-  const status = searchParams.status || 'all';
 
-  let query = supabase
+  const { data, error } = await supabase
     .from('orders')
     .select('*, order_items(product_name, quantity, unit_price_mad)')
-    .order('created_at', { ascending: false });
+    .gte('created_at', start)
+    .lt('created_at', end)
+    .order('created_at', { ascending: false })
+    .limit(200);
 
-  if (city !== 'all') query = query.eq('city', city);
-  if (status !== 'all') query = query.eq('status', status);
+  const all = (data ?? []) as Order[];
 
-  const { data: orders } = await query;
+  // Les commandes annulées ne comptent pas dans les totaux.
+  const active = all.filter((o) => o.status !== 'annule');
+  const cashToCollect = active.reduce((sum, o) => sum + Number(o.total_mad), 0);
+  const newCount = all.filter((o) => o.status === 'nouveau').length;
+
+  const perCity = CITIES.map((c) => {
+    const list = active.filter((o) => o.city === c);
+    return { city: c, count: list.length, total: list.reduce((s, o) => s + Number(o.total_mad), 0) };
+  });
+
+  const visible = all.filter(
+    (o) => (city === 'all' || o.city === city) && (status === 'all' || o.status === status)
+  );
+
+  const chipBase = 'whitespace-nowrap rounded-full border px-3 py-1.5 text-[13px]';
+  const chipOn = 'border-green-500/40 bg-green-500/15 text-green-300';
+  const chipOff = 'border-white/10 text-zinc-400 hover:bg-white/5';
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold text-white">Commandes</h1>
+    <div className="mx-auto w-full max-w-5xl">
+      {/* En-tête */}
+      <header className="mb-3 flex items-center justify-between">
+        <div>
+          <h1 className="text-base font-medium text-white">Commandes</h1>
+          <p className="text-xs text-zinc-500">Art Bouquet, admin</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <DayPicker day={day} city={city} status={status} />
+          <form action={signOut}>
+            <button
+              type="submit"
+              aria-label="Déconnexion"
+              className="rounded-md p-1.5 text-zinc-500 hover:bg-white/5 hover:text-white md:hidden"
+            >
+              <LogOut size={18} aria-hidden="true" />
+            </button>
+          </form>
+        </div>
+      </header>
+
+      {/* Alerte "Nouvelle commande" en temps réel */}
+      <RealtimeOrders />
+
+      {/* Résumé du jour */}
+      <section className="grid grid-cols-3 gap-2" aria-label="Résumé du jour">
+        <div className="rounded-lg bg-[#18181b] p-2.5">
+          <p className="text-[11px] text-zinc-500">Commandes</p>
+          <p className="text-xl font-medium text-white">{active.length}</p>
+        </div>
+        <div className="rounded-lg bg-[#18181b] p-2.5">
+          <p className="text-[11px] text-zinc-500">À encaisser</p>
+          <p className="text-xl font-medium text-white">{fmt(cashToCollect)}</p>
+        </div>
+        <div className="rounded-lg bg-[#18181b] p-2.5">
+          <p className="text-[11px] text-zinc-500">Nouvelles</p>
+          <p className="text-xl font-medium text-white">{newCount}</p>
+        </div>
+      </section>
+
+      {/* Par ville */}
+      <p className="mb-1.5 mt-4 text-xs text-zinc-500">Par ville</p>
+      <div className="flex gap-1.5 overflow-x-auto pb-1">
+        <Link href={ordersHref({ day, status })} className={`${chipBase} ${city === 'all' ? chipOn : chipOff}`}>
+          Toutes {active.length}
+        </Link>
+        {perCity.map((c) => (
+          <Link
+            key={c.city}
+            href={ordersHref({ day, city: c.city, status })}
+            className={`${chipBase} ${city === c.city ? chipOn : chipOff}`}
+          >
+            {c.city} {c.count} · {fmt(c.total)}
+          </Link>
+        ))}
       </div>
 
-      <div className="space-y-4">
-        {orders?.map((order) => (
+      {/* Filtre par statut */}
+      <div className="mt-2 flex gap-1.5 overflow-x-auto pb-1">
+        {['all', ...ORDER_STATUSES].map((s) => (
+          <Link
+            key={s}
+            href={ordersHref({ day, city, status: s })}
+            className={`rounded-md border px-2.5 py-1 text-xs whitespace-nowrap ${
+              s === status ? 'border-white/30 bg-white/10 text-white' : 'border-white/10 text-zinc-500 hover:bg-white/5'
+            }`}
+          >
+            {s === 'all' ? 'Tous les statuts' : STATUS_LABELS[s as keyof typeof STATUS_LABELS]}
+          </Link>
+        ))}
+      </div>
+
+      {error && (
+        <p role="alert" className="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">
+          Impossible de charger les commandes : {error.message}
+        </p>
+      )}
+
+      {/* Liste des commandes */}
+      <div className="mt-3 grid gap-3 lg:grid-cols-2">
+        {visible.map((order) => (
           <OrderCard key={order.id} order={order} />
         ))}
       </div>
-    </div>
-  );
-}
 
-function OrderCard({ order }: any) {
-  const date = new Date(order.created_at);
-  const time = date.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-
-  return (
-    <div className="rounded-xl border border-white/10 bg-[#18181b] p-6">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <span className="font-mono text-sm text-zinc-400">{order.reference}</span>
-          <span className="ml-3 text-xs text-zinc-500">{time}</span>
-        </div>
-        <StatusBadge status={order.status} />
-      </div>
-
-      <div className="mb-4">
-        <h3 className="font-semibold text-lg text-white">{order.customer_name}</h3>
-        <p className="text-sm text-zinc-400">{order.address}, {order.city}</p>
-        <p className="text-sm text-zinc-500">📞 {order.phone}</p>
-      </div>
-
-      <div className="mb-4 space-y-1">
-        {order.order_items?.map((item: any, idx: number) => (
-          <p key={idx} className="text-sm text-zinc-300">{item.quantity} × {item.product_name}</p>
-        ))}
-      </div>
-
-      {order.card_message && (
-        <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 mb-4">
-          <p className="text-xs text-yellow-400">💬 Message: {order.card_message}</p>
-        </div>
+      {visible.length === 0 && !error && (
+        <p className="mt-10 text-center text-sm text-zinc-500">Aucune commande pour ce jour.</p>
       )}
-
-      <div className="flex items-center justify-between mb-4">
-        <span className="text-sm text-zinc-400">Livraison: {order.delivery_fee_mad} MAD</span>
-        <span className="font-bold text-lg text-white">{order.total_mad} MAD</span>
-      </div>
-
-      <div className="flex gap-2 mb-4">
-        <a href={	el:} className="flex-1 rounded-lg bg-zinc-800 py-2 text-center text-sm text-white hover:bg-zinc-700">📞 Appeler</a>
-        <a href={https://wa.me/212} target="_blank" className="flex-1 rounded-lg bg-zinc-800 py-2 text-center text-sm text-white hover:bg-zinc-700">💬 WhatsApp</a>
-      </div>
-
-      <div className="grid grid-cols-4 gap-2">
-        {['nouveau', 'confirme', 'en_livraison', 'livre'].map((s) => (
-          <button key={s} className={py-2 rounded-lg text-xs font-medium }>
-            {s.charAt(0).toUpperCase() + s.slice(1)}
-          </button>
-        ))}
-      </div>
     </div>
   );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    nouveau: 'bg-yellow-500/20 text-yellow-400',
-    confirme: 'bg-blue-500/20 text-blue-400',
-    en_livraison: 'bg-purple-500/20 text-purple-400',
-    livre: 'bg-green-500/20 text-green-400',
-    annule: 'bg-red-500/20 text-red-400',
-  };
-  return <span className={inline-block rounded-full px-3 py-1 text-xs font-medium }>{status}</span>;
 }
